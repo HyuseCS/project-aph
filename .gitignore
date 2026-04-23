@@ -1,0 +1,14 @@
+# Python venv in MarketTimingEngine
+MarketTimingEngine/bin/
+MarketTimingEngine/include/
+MarketTimingEngine/lib/
+MarketTimingEngine/lib64
+MarketTimingEngine/pyvenv.cfg
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data outputs
+MarketTimingEngine/processed_trends.csv
