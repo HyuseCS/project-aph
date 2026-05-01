@@ -1,17 +1,18 @@
 import xgboost as xgb
 import pandas as pd
+from datetime import datetime, timedelta
 
-
-def get_dynamic_directive(trend_percentage, volatility, sma_7, sma_30, season_code, weather_code, commodity_name, days_held, model, current_price):
+def get_dynamic_directive(trend_percentage, volatility, sma_7, sma_30, season_code, weather_code, commodity_name, days_held, model, current_price, current_date_str):
     """
-    Calculates the market directive using smoothed features, penalized by spoilage risk.
+    Calculates the market directive using smoothed features, penalized by spoilage risk,
+    and forecasts future prices to find the peak date.
     """
     # 1. Define the physical constraints
     shelf_life_db = {
         "Rice": 365,
         "Kamote": 30,
         "Cabbage": 14,
-        "Tomatoes": 7
+        "Tomato": 7
     }
     
     max_days = shelf_life_db.get(commodity_name, 7)
@@ -20,36 +21,44 @@ def get_dynamic_directive(trend_percentage, volatility, sma_7, sma_30, season_co
     # 2. Calculate the Spoilage Risk (0.0 = Fresh, 1.0 = Rotten)
     spoilage_risk = (days_held / max_days) ** 2 
     
-    # 3. Construct the expanded State DataFrame
-    # The XGBoost model must be fed the exact columns it was trained on.
-    current_state = pd.DataFrame({
-        'trend_7d': [trend_percentage],
-        'volatility_14d': [volatility],
-        'sma_7d': [sma_7],
-        'sma_30d': [sma_30],
-        'seasonality': [season_code],
-        'weather_shock': [weather_code]
-    })
+    # 3. Forecast prices for the next 14 days
+    future_prices = []
+    for day_offset in range(1, 15):
+        current_state = pd.DataFrame({
+            'trend_7d': [trend_percentage],
+            'volatility_14d': [volatility],
+            'sma_7d': [sma_7],
+            'sma_30d': [sma_30],
+            'seasonality': [season_code],
+            'weather_shock': [weather_code],
+            'day_offset': [day_offset]
+        })
+        predicted_price = model.predict(current_state)[0]
+        future_prices.append(predicted_price)
     
-    # Predict probability of price going up (Class 1)
-    raw_hold_prob = model.predict_proba(current_state)[0][1]
+    peak_price = max(future_prices)
+    peak_day_offset = future_prices.index(peak_price) + 1
     
-    # 4. Apply the Perishability Penalty
-    adjusted_hold_prob = raw_hold_prob * (1 - spoilage_risk)
+    current_date = datetime.strptime(current_date_str, '%Y-%m-%d')
+    peak_date = current_date + timedelta(days=peak_day_offset)
+    peak_date_str = peak_date.strftime('%B %d')
     
-    print(f"DEBUG: {commodity_name} | Raw AI: {raw_hold_prob:.0%} | Spoilage Risk: {spoilage_risk:.0%} | Adjusted: {adjusted_hold_prob:.0%}")
+    # Simple logic: Is it worth waiting?
+    expected_gain = peak_price - current_price
+    
+    print(f"DEBUG: {commodity_name} | Peak: P{peak_price:.2f} in {peak_day_offset} days | Spoilage Risk: {spoilage_risk:.0%}")
 
     # 5. Dynamic Thresholding
     price_info = f"{commodity_name} is currently P{current_price:.2f}/kg."
     
-    if spoilage_risk > 0.85:
+    if spoilage_risk > 0.85 or days_left <= 2:
         return f"SELL NOW: {price_info} Your crop will spoil in about {days_left} days. Do not wait."
-    elif adjusted_hold_prob >= 0.70:
-        return f"WAIT: {price_info} The price is going up and you still have {days_left} days left."
-    elif adjusted_hold_prob >= 0.40:
-        return f"SELL SOON: {price_info} Find a buyer soon. You only have {days_left} days left."
+    elif expected_gain > 0.5 and peak_day_offset > days_left-2:
+        return f"SELL SOON: {price_info} The price might peak at P{peak_price:.2f} on {peak_date_str}, but your crop will likely spoil before then."
+    elif expected_gain > 0.5:
+        return f"WAIT: {price_info} Our models predict the price will peak around {peak_date_str} at ~P{peak_price:.2f}/kg. Your crop is stable."
     else:
-        return f"SELL NOW: {price_info} The price is dropping fast. Take the best offer today."
+        return f"SELL NOW: {price_info} Prices are not expected to rise significantly. Take the best offer today."
 
 
 def process_market_trends(csv_filepath, output_filepath="processed_trends.csv"):
@@ -146,7 +155,8 @@ def handle_farmer_sms(requested_commodity, current_season, current_weather, days
         commodity_name=actual_commodity_name,
         days_held=days_held,
         model=model, # Explicitly passing the trained model
-        current_price=current_price
+        current_price=current_price,
+        current_date_str=current_date
     )
     
     return directive
@@ -156,19 +166,19 @@ if __name__ == "__main__":
     try:
         results = process_market_trends("market_prices.csv")
         
-        # print("\nPreview of the processed data:")
-        # print(results.tail(10)) # Show the last 10 rows
+        print("\nPreview of the processed data:")
+        print(results.tail(10)) # Show the last 10 rows
 
-        # print("\n--- Testing the Inference Engine ---")
+        print("\n--- Testing the Inference Engine ---")
 
-        model = xgb.XGBClassifier()
-        model.load_model("market_timing_v1.json") # Load the trained model
+        model = xgb.XGBRegressor()
+        model.load_model("market_timing_v2.json") # Load the trained model
 
         final_sms_text = handle_farmer_sms(
             requested_commodity="kamote", 
-            current_season="dry", 
-            current_weather="sunny", 
-            days_held=17, # Testing a crop near its 180-day limit
+            current_season="wet", 
+            current_weather="flood", 
+            days_held=4, 
             model=model, 
             results_df=results
         )
