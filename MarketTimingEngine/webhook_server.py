@@ -54,7 +54,7 @@ def register_webhook() -> None | str:
     ):
         return
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30.0) as client:
         auth = (
             current_app.config["SMS_GATE_API_USERNAME"],
             current_app.config["SMS_GATE_API_PASSWORD"],
@@ -71,7 +71,6 @@ def register_webhook() -> None | str:
         except Exception as e:
             print(f"Warning: Failed to clean up orphaned webhooks: {e}")
 
-    with httpx.Client() as client:
         response = client.post(
             f"{current_app.config['SMS_GATE_API_URL']}/webhooks",
             auth=auth,
