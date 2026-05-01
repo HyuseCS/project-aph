@@ -123,8 +123,10 @@ def send_sms_reply(phone_number, message_text):
 
         response = requests.post(target_url, json=payload, headers=headers, auth=auth, timeout=10)
         
-        if response.status_code != 200:
+        if response.status_code not in [200, 201, 202]:
             print(f"SMS Gateway returned error {response.status_code}: {response.text}")
+        else:
+            print(f"SMS sent successfully (Status {response.status_code})")
     
     except requests.exceptions.RequestException as e:
         print(f"SMS Gateway error: {str(e)}")
@@ -145,6 +147,9 @@ def receive_sms():
         return jsonify({"error": "Malformed JSON payload"}), 400
     
     event_type = data.get('event')
+    message_id = data.get('payload', {}).get('id', 'unknown')
+    
+    print(f"RECEIVED WEBHOOK: Event={event_type} | MsgID={message_id}")
 
     if event_type == 'sms:received':
         payload = data.get('payload', {})
@@ -153,6 +158,7 @@ def receive_sms():
         
         def process_request():
             try:
+                print(f"Processing MsgID={message_id} in background...")
                 parts = [p.strip() for p in message_text.split(',')]
                 if len(parts) >= 4:
                     requested_commodity = parts[0]
