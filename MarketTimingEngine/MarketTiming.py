@@ -2,18 +2,20 @@ import xgboost as xgb
 import pandas as pd
 
 
-def get_dynamic_directive(trend_percentage, volatility, sma_7, sma_30, season_code, weather_code, commodity_name, days_held, model):
+def get_dynamic_directive(trend_percentage, volatility, sma_7, sma_30, season_code, weather_code, commodity_name, days_held, model, current_price):
     """
     Calculates the market directive using smoothed features, penalized by spoilage risk.
     """
     # 1. Define the physical constraints
     shelf_life_db = {
-        "Yellow Corn": 180,
+        "Rice": 365,
+        "Kamote": 30,
         "Cabbage": 14,
         "Tomatoes": 7
     }
     
     max_days = shelf_life_db.get(commodity_name, 7)
+    days_left = max(0, max_days - days_held)
     
     # 2. Calculate the Spoilage Risk (0.0 = Fresh, 1.0 = Rotten)
     spoilage_risk = (days_held / max_days) ** 2 
@@ -38,14 +40,16 @@ def get_dynamic_directive(trend_percentage, volatility, sma_7, sma_30, season_co
     print(f"DEBUG: {commodity_name} | Raw AI: {raw_hold_prob:.0%} | Spoilage Risk: {spoilage_risk:.0%} | Adjusted: {adjusted_hold_prob:.0%}")
 
     # 5. Dynamic Thresholding
+    price_info = f"{commodity_name} is currently P{current_price:.2f}/kg."
+    
     if spoilage_risk > 0.85:
-        return f"SELL NOW: Your {commodity_name} is near spoilage. Do not wait for better prices."
+        return f"SELL NOW: {price_info} Your crop will spoil in about {days_left} days. Do not wait."
     elif adjusted_hold_prob >= 0.70:
-        return "WAIT: Prices are climbing and your crop is stable."
+        return f"WAIT: {price_info} The price is going up and you still have {days_left} days left."
     elif adjusted_hold_prob >= 0.40:
-        return "SELL SOON: Find a buyer. The risk of spoilage is outweighing potential price gains."
+        return f"SELL SOON: {price_info} Find a buyer soon. You only have {days_left} days left."
     else:
-        return "SELL NOW: Prices are dropping fast. Take the best offer today."
+        return f"SELL NOW: {price_info} The price is dropping fast. Take the best offer today."
 
 
 def process_market_trends(csv_filepath, output_filepath="processed_trends.csv"):
@@ -126,6 +130,7 @@ def handle_farmer_sms(requested_commodity, current_season, current_weather, days
     current_volatility = latest_data['volatility_14d']
     current_sma_7 = latest_data['sma_7d']
     current_sma_30 = latest_data['sma_30d']
+    current_price = latest_data['price']
     current_date = latest_data['date'].strftime('%Y-%m-%d')
     
     print(f"DEBUG: SMS triggered for {current_date} | Trend: {current_trend:.2%} | Volatility: {current_volatility:.2f}")
@@ -140,7 +145,8 @@ def handle_farmer_sms(requested_commodity, current_season, current_weather, days
         weather_code=weather_code,
         commodity_name=actual_commodity_name,
         days_held=days_held,
-        model=model # Explicitly passing the trained model
+        model=model, # Explicitly passing the trained model
+        current_price=current_price
     )
     
     return directive
@@ -159,7 +165,7 @@ if __name__ == "__main__":
         model.load_model("market_timing_v1.json") # Load the trained model
 
         final_sms_text = handle_farmer_sms(
-            requested_commodity="Yellow Corn", 
+            requested_commodity="kamote", 
             current_season="dry", 
             current_weather="sunny", 
             days_held=17, # Testing a crop near its 180-day limit
