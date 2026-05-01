@@ -1,7 +1,7 @@
 from flask import Flask, Response, request, jsonify, current_app
 from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
-import requests, os, hmac, hashlib, json, threading
+import requests, os, hmac, hashlib, json, threading, time
 import httpx
 
 from MarketTiming import process_market_trends, handle_farmer_sms
@@ -26,6 +26,9 @@ model = xgb.XGBRegressor()
 model.load_model("market_timing_v2.json")
 market_data = process_market_trends("market_prices.csv")
 
+# Simple deduplication cache: (sender, message_text) -> timestamp
+processed_cache = {}
+cache_lock = threading.Lock()
 
 def verify_signature(raw_body, timestamp, signature, secret_key):
     if not timestamp or not signature:
@@ -68,6 +71,7 @@ def register_webhook() -> None | str:
         except Exception as e:
             print(f"Warning: Failed to clean up orphaned webhooks: {e}")
 
+    with httpx.Client() as client:
         response = client.post(
             f"{current_app.config['SMS_GATE_API_URL']}/webhooks",
             auth=auth,
@@ -146,19 +150,36 @@ def receive_sms():
     except json.JSONDecodeError:
         return jsonify({"error": "Malformed JSON payload"}), 400
     
-    event_type = data.get('event')
-    message_id = data.get('payload', {}).get('id', 'unknown')
+    # DEBUG: Print full payload to see structure
+    print(f"FULL WEBHOOK PAYLOAD: {json.dumps(data, indent=2)}")
     
-    print(f"RECEIVED WEBHOOK: Event={event_type} | MsgID={message_id}")
+    event_type = data.get('event')
+    payload_data = data.get('payload', {})
+    phone_number = payload_data.get('sender')
+    message_text = payload_data.get('message', '').strip()
+    
+    # Attempt to find any kind of ID
+    msg_id = payload_data.get('id') or data.get('id') or 'unknown'
+    
+    print(f"RECEIVED WEBHOOK: Event={event_type} | MsgID={msg_id} | Sender={phone_number}")
 
     if event_type == 'sms:received':
-        payload = data.get('payload', {})
-        phone_number = payload.get('sender')
-        message_text = payload.get('message', '').strip()
+        # Deduplication check
+        current_time = time.time()
+        cache_key = (phone_number, message_text)
         
+        with cache_lock:
+            if cache_key in processed_cache:
+                last_time = processed_cache[cache_key]
+                if current_time - last_time < 10:  # 10 second window
+                    print(f"DEDUPLICATED: Ignoring duplicate message from {phone_number} within 10s window.")
+                    return jsonify({"status": "duplicate_ignored"}), 200
+            
+            processed_cache[cache_key] = current_time
+
         def process_request():
             try:
-                print(f"Processing MsgID={message_id} in background...")
+                print(f"Processing MsgID={msg_id} in background...")
                 parts = [p.strip() for p in message_text.split(',')]
                 if len(parts) >= 4:
                     requested_commodity = parts[0]
