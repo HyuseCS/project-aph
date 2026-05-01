@@ -98,19 +98,28 @@ def process_market_trends(csv_filepath, output_filepath="processed_trends.csv"):
     
     return final_df
 
-def handle_farmer_sms(requested_commodity, current_season_code, current_weather_code, days_held, model, results_df):
+def handle_farmer_sms(requested_commodity, current_season, current_weather, days_held, model, results_df):
     """
     Acts as the webhook bridge: pulls the latest processed features from the database
     and feeds them to the AI inference engine.
     """
-    # 1. Filter the dataset for ONLY the commodity the farmer texted about
-    commodity_data = results_df[results_df['commodity'] == requested_commodity]
+    season_map = {"dry": 1, "wet": 2}
+    weather_map = {"sunny": 0, "normal": 0, "drought": 1, "flood": 2}
+    
+    season_code = season_map.get(current_season.lower().strip(), 1)
+    weather_code = weather_map.get(current_weather.lower().strip(), 0)
+
+    # 1. Filter the dataset for ONLY the commodity the farmer texted about (case-insensitive)
+    commodity_data = results_df[results_df['commodity'].str.lower() == requested_commodity.lower().strip()]
     
     if commodity_data.empty:
         return f"Error: No recent data found for {requested_commodity}."
     
     # 2. Isolate the absolute last row of THAT specific commodity (the most recent day)
     latest_data = commodity_data.iloc[-1]
+    
+    # Extract the properly cased commodity name from the dataset
+    actual_commodity_name = latest_data['commodity']
     
     # 3. Extract ALL required features
     current_trend = latest_data['trend_7d']
@@ -127,39 +136,32 @@ def handle_farmer_sms(requested_commodity, current_season_code, current_weather_
         volatility=current_volatility,
         sma_7=current_sma_7,
         sma_30=current_sma_30,
-        season_code=current_season_code, 
-        weather_code=current_weather_code,
-        commodity_name=requested_commodity,
+        season_code=season_code, 
+        weather_code=weather_code,
+        commodity_name=actual_commodity_name,
         days_held=days_held,
         model=model # Explicitly passing the trained model
     )
     
     return directive
 
-# ==========================================
-# Execution
-# ==========================================
+
 if __name__ == "__main__":
-    # Assuming your raw data is named 'market_prices.csv'
-    # It will output a new file named 'processed_trends.csv'
     try:
         results = process_market_trends("market_prices.csv")
         
-        print("\nPreview of the processed data:")
-        print(results.tail(10)) # Show the last 10 rows
+        # print("\nPreview of the processed data:")
+        # print(results.tail(10)) # Show the last 10 rows
 
-        # ==========================================
-        # 4. SIMULATING A REAL-WORLD SMS TRIGGER
-        # ==========================================
-        print("\n--- Testing the Inference Engine ---")
+        # print("\n--- Testing the Inference Engine ---")
 
         model = xgb.XGBClassifier()
         model.load_model("market_timing_v1.json") # Load the trained model
 
         final_sms_text = handle_farmer_sms(
             requested_commodity="Yellow Corn", 
-            current_season_code=1, 
-            current_weather_code=0, 
+            current_season="dry", 
+            current_weather="sunny", 
             days_held=17, # Testing a crop near its 180-day limit
             model=model, 
             results_df=results
