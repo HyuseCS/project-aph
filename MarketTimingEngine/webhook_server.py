@@ -1,7 +1,7 @@
 from flask import Flask, Response, request, jsonify, current_app
 from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
-import requests, os, hmac, hashlib, json
+import requests, os, hmac, hashlib, json, threading
 import httpx
 
 from MarketTiming import process_market_trends, handle_farmer_sms
@@ -22,8 +22,8 @@ app.config["WEBHOOK_URL"] = WEBHOOK_URL
 app.config["SMS_GATE_API_URL"] = f"http://{SMSGATE_PHONE_IP}:8080" if SMSGATE_PHONE_IP else None
 
 print("Loading model and processing data...")
-model = xgb.XGBClassifier()
-model.load_model("market_timing_v1.json")
+model = xgb.XGBRegressor()
+model.load_model("market_timing_v2.json")
 market_data = process_market_trends("market_prices.csv")
 
 
@@ -106,7 +106,8 @@ def unregister_webhook(webhook_id: str | None):
 
 def send_sms_reply(phone_number, message_text):
     if not phone_number or not message_text:
-        return jsonify(error="Missing required query parameters: to, message"), 400
+        print("Error: Missing required query parameters: to, message")
+        return
 
     target_url = f"http://{SMSGATE_PHONE_IP}:8080/messages"
     headers = {
@@ -120,16 +121,13 @@ def send_sms_reply(phone_number, message_text):
     try:
         auth = HTTPBasicAuth(SMSGATE_API_USERNAME, SMSGATE_API_PASSWORD)
 
-        response = requests.post(target_url, json=payload, headers=headers, auth=auth)
-
-        return Response(
-            response=response.text,
-            status=response.status_code,
-            content_type=response.headers.get('Content-Type', 'application/json')
-        )
+        response = requests.post(target_url, json=payload, headers=headers, auth=auth, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"SMS Gateway returned error {response.status_code}: {response.text}")
     
     except requests.exceptions.RequestException as e:
-        return jsonify(error=f"SMS Gateway error: {str(e)}"), 500
+        print(f"SMS Gateway error: {str(e)}")
 
 
 @app.route('/webhook/sms-received', methods=['POST'])
@@ -150,34 +148,47 @@ def receive_sms():
 
     if event_type == 'sms:received':
         payload = data.get('payload', {})
-        phone_number = payload.get('phoneNumber')
+        phone_number = payload.get('sender')
         message_text = payload.get('message', '').strip()
         
-        try:
-            parts = [p.strip() for p in message_text.split(',')]
-            if len(parts) >= 4:
-                requested_commodity = parts[0]
-                current_season = parts[1]
-                current_weather = parts[2]
-                days_held = int(parts[3])
-                
-                response_message = handle_farmer_sms(
-                    requested_commodity=requested_commodity, 
-                    current_season=current_season, 
-                    current_weather=current_weather, 
-                    days_held=days_held,
-                    model=model, 
-                    results_df=market_data
-                )
-                return send_sms_reply(phone_number, response_message)
-            else:
-                return send_sms_reply(phone_number, "Format error. Format: crop name, season (dry or wet), " \
-                "weather (sunny, normal, drought, flood), # of days held. Example: yellow corn, dry, sunny, 30")
-        except ValueError:
-            return send_sms_reply(phone_number, "Value error. Days held must be a valid number.")
+        def process_request():
+            try:
+                parts = [p.strip() for p in message_text.split(',')]
+                if len(parts) >= 4:
+                    requested_commodity = parts[0]
+                    current_season = parts[1]
+                    current_weather = parts[2]
+                    
+                    try:
+                        days_held = int(parts[3])
+                    except ValueError:
+                        send_sms_reply(phone_number, f"Value error: '{parts[3]}' is not a valid number for days held.")
+                        return
+                    
+                    response_message = handle_farmer_sms(
+                        requested_commodity=requested_commodity, 
+                        current_season=current_season, 
+                        current_weather=current_weather, 
+                        days_held=days_held,
+                        model=model, 
+                        results_df=market_data
+                    )
+                    send_sms_reply(phone_number, response_message)
+                else:
+                    send_sms_reply(phone_number, "Format error. Format: crop name, season (dry or wet), " \
+                    "weather (sunny, normal, drought, flood), # of days held. Example: tomato, dry, sunny, 30")
+            except Exception as e:
+                print(f"Background processing error: {e}")
+                send_sms_reply(phone_number, "An unexpected error occurred while processing your request.")
+
+        # Process in background to avoid webhook timeout
+        threading.Thread(target=process_request).start()
+        
+        return jsonify({"status": "accepted"}), 202
     
     else:
         return jsonify({"error": "Unsupported event type"}), 400
+
 
 if __name__ == '__main__':
     with app.app_context():
