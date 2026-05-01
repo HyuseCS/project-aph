@@ -18,11 +18,11 @@
 Create a `.env` file in the same directory with the following contents:
 
 ```env
-SMSGATE_PHONE_IP="your_phone_ip"          # In SMSGate app, enable local server; see Local address
+SMSGATE_PHONE_IP="your_phone_ip"          # Use tailscale IP
 SMSGATE_API_USERNAME="username"           # SMSGate Local server - username
 SMSGATE_API_PASSWORD="password"           # SMSGate Local server - password
 WEBHOOK_URL="https://<url_here>/webhook/sms-received" # URL from tailscale serve command
-SIGNING_KEY="temp"                        # Temporary placeholder
+SIGNING_KEY="temp"                        # Replace after running server once; see below
 ```
 
 ## Running and Bootstrapping
