@@ -12,3 +12,8 @@ __pycache__/
 
 # Data outputs
 MarketTimingEngine/processed_trends.csv
+
+# Frontend Web Dashboard
+MarketTimingEngine/frontend/node_modules/
+MarketTimingEngine/frontend/dist/
+MarketTimingEngine/static/

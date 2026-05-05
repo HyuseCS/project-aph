@@ -1,13 +1,16 @@
-from flask import Flask, Response, request, jsonify, current_app
+from flask import Flask, Response, request, jsonify, current_app, send_from_directory
+from flask_cors import CORS
 from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
 import requests, os, hmac, hashlib, json, threading, time
 import httpx
+import pandas as pd
 
 from MarketTiming import process_market_trends, handle_farmer_sms
 import xgboost as xgb
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static', static_url_path='')
+CORS(app)
 load_dotenv()
 
 SMSGATE_PHONE_IP = os.getenv("SMSGATE_PHONE_IP")
@@ -29,6 +32,10 @@ market_data = process_market_trends("market_prices.csv")
 # Simple deduplication cache: (sender, message_text) -> timestamp
 processed_cache = {}
 cache_lock = threading.Lock()
+
+# Data entry locks and paths
+csv_lock = threading.Lock()
+CSV_FILE_PATH = "market_prices.csv"
 
 def verify_signature(raw_body, timestamp, signature, secret_key):
     if not timestamp or not signature:
@@ -214,6 +221,186 @@ def receive_sms():
     
     else:
         return jsonify({"error": "Unsupported event type"}), 400
+
+# ==========================================
+# WEB DASHBOARD API ROUTES
+# ==========================================
+
+@app.route('/')
+def serve_dashboard():
+    return send_from_directory(app.static_folder, 'index.html')
+
+@app.route('/api/prices', methods=['GET'])
+def get_prices():
+    try:
+        with csv_lock:
+            df = pd.read_csv(CSV_FILE_PATH)
+        
+        # Apply filters
+        commodity = request.args.get('commodity')
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        
+        if commodity:
+            df = df[df['commodity'] == commodity]
+        if start_date:
+            df = df[df['date'] >= start_date]
+        if end_date:
+            df = df[df['date'] <= end_date]
+            
+        records = df.to_dict('records')
+        return jsonify({"data": records})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/prices', methods=['POST'])
+def add_prices():
+    try:
+        data = request.json
+        records = data.get('records', [])
+        if not records:
+            return jsonify({"error": "No records provided"}), 400
+            
+        new_df = pd.DataFrame(records)
+        
+        with csv_lock:
+            df = pd.read_csv(CSV_FILE_PATH)
+            # Combine and remove exact duplicates based on date and commodity
+            combined = pd.concat([df, new_df])
+            combined = combined.drop_duplicates(subset=['date', 'commodity'], keep='last')
+            # Sort by date and reset index
+            combined = combined.sort_values(by=['date', 'commodity']).reset_index(drop=True)
+            combined.to_csv(CSV_FILE_PATH, index=False)
+            
+        return jsonify({"message": f"Successfully added {len(records)} records", "added": len(records)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/prices', methods=['PUT'])
+def update_price():
+    try:
+        data = request.json
+        date = data.get('date')
+        commodity = data.get('commodity')
+        price = data.get('price')
+        
+        if not all([date, commodity, price]):
+            return jsonify({"error": "Missing required fields"}), 400
+            
+        with csv_lock:
+            df = pd.read_csv(CSV_FILE_PATH)
+            mask = (df['date'] == date) & (df['commodity'] == commodity)
+            if not mask.any():
+                return jsonify({"error": "Record not found"}), 404
+                
+            df.loc[mask, 'price'] = float(price)
+            df.to_csv(CSV_FILE_PATH, index=False)
+            
+        return jsonify({"message": "Record updated successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/prices', methods=['DELETE'])
+def delete_price():
+    try:
+        data = request.json
+        date = data.get('date')
+        commodity = data.get('commodity')
+        
+        if not all([date, commodity]):
+            return jsonify({"error": "Missing required fields"}), 400
+            
+        with csv_lock:
+            df = pd.read_csv(CSV_FILE_PATH)
+            initial_len = len(df)
+            df = df[~((df['date'] == date) & (df['commodity'] == commodity))]
+            
+            if len(df) == initial_len:
+                return jsonify({"error": "Record not found"}), 404
+                
+            df.to_csv(CSV_FILE_PATH, index=False)
+            
+        return jsonify({"message": "Record deleted successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/prices/import', methods=['POST'])
+def import_csv():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+        
+    if not file.filename.endswith('.csv'):
+        return jsonify({"error": "Must be a CSV file"}), 400
+        
+    try:
+        import_df = pd.read_csv(file)
+        required_cols = {'date', 'commodity', 'price'}
+        if not required_cols.issubset(set(import_df.columns)):
+            return jsonify({"error": f"CSV must contain columns: {', '.join(required_cols)}"}), 400
+            
+        with csv_lock:
+            df = pd.read_csv(CSV_FILE_PATH)
+            combined = pd.concat([df, import_df])
+            # Keep imported records (last) over existing ones if duplicate
+            combined = combined.drop_duplicates(subset=['date', 'commodity'], keep='last')
+            combined = combined.sort_values(by=['date', 'commodity']).reset_index(drop=True)
+            combined.to_csv(CSV_FILE_PATH, index=False)
+            
+        added = len(combined) - len(df)
+        return jsonify({"message": f"Successfully imported data. Added/Updated {len(import_df)} records.", "added": len(import_df)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/refresh', methods=['POST'])
+def refresh_model():
+    global market_data
+    try:
+        with csv_lock:
+            market_data = process_market_trends(CSV_FILE_PATH)
+        return jsonify({"message": "Model data refreshed successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    try:
+        with csv_lock:
+            df = pd.read_csv(CSV_FILE_PATH)
+            
+        if df.empty:
+            return jsonify({
+                "total_records": 0,
+                "date_range": {"start": "", "end": ""},
+                "commodities": {}
+            })
+            
+        df['price'] = pd.to_numeric(df['price'])
+        
+        stats = {
+            "total_records": len(df),
+            "date_range": {
+                "start": df['date'].min(),
+                "end": df['date'].max()
+            },
+            "commodities": {}
+        }
+        
+        for commodity in df['commodity'].unique():
+            c_df = df[df['commodity'] == commodity]
+            stats["commodities"][commodity] = {
+                "count": len(c_df),
+                "avg_price": float(c_df['price'].mean()),
+                "min_price": float(c_df['price'].min()),
+                "max_price": float(c_df['price'].max())
+            }
+            
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == '__main__':

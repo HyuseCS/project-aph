@@ -37,3 +37,31 @@ The application automatically registers its webhook with the SMSGate app on star
 3. **Update `.env`**: Stop the server (Ctrl+C), update `SIGNING_KEY` in your `.env` file with the actual key from the app, and **restart the server**.
 
 The server is now fully configured and ready to process SMS requests dynamically!
+
+## Web Data Entry Dashboard
+
+A web-based dashboard is integrated into the Flask server to let you view, add, edit, and delete commodity prices, as well as import CSV files and refresh the Machine Learning model data dynamically.
+
+### Accessing the Dashboard
+
+Once the `webhook_server.py` is running, the dashboard is served automatically at:
+```
+http://localhost:5000/
+```
+*(Or access it via your Tailscale IP on port 5000 from another device)*
+
+### Developing the Dashboard
+
+The dashboard is built with Vite, React, and TypeScript. To make changes:
+1. Open a second terminal and navigate to the `frontend` folder:
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+2. The dev server runs on `http://localhost:5173` and proxies API requests to the Flask server.
+3. When you're done, build the dashboard for production:
+   ```bash
+   npm run build
+   ```
+   This will place the optimized assets in the `static/` directory for Flask to serve.
